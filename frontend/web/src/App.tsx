@@ -5,6 +5,7 @@ import { getContractReadOnly, getContractWithSigner } from "./components/useCont
 import "./App.css";
 import { useAccount } from 'wagmi';
 import { useFhevm, useEncrypt, useDecrypt } from '../fhevm-sdk/src';
+import { ethers } from 'ethers';
 
 interface MoraleData {
   id: string;
@@ -19,34 +20,43 @@ interface MoraleData {
   description: string;
 }
 
+interface MoraleStats {
+  totalEntries: number;
+  avgMorale: number;
+  verifiedCount: number;
+  todayEntries: number;
+  highMoraleCount: number;
+}
+
 const App: React.FC = () => {
   const { address, isConnected } = useAccount();
   const [loading, setLoading] = useState(true);
-  const [moraleList, setMoraleList] = useState<MoraleData[]>([]);
+  const [moraleData, setMoraleData] = useState<MoraleData[]>([]);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [showCreateModal, setShowCreateModal] = useState(false);
-  const [creatingMorale, setCreatingMorale] = useState(false);
+  const [creatingEntry, setCreatingEntry] = useState(false);
   const [transactionStatus, setTransactionStatus] = useState<{ visible: boolean; status: "pending" | "success" | "error"; message: string; }>({ 
     visible: false, 
-    status: "pending", 
+    status: "pending" as const, 
     message: "" 
   });
-  const [newMoraleData, setNewMoraleData] = useState({ name: "", moraleScore: "", description: "" });
-  const [selectedMorale, setSelectedMorale] = useState<MoraleData | null>(null);
+  const [newEntryData, setNewEntryData] = useState({ name: "", morale: "", description: "" });
+  const [selectedEntry, setSelectedEntry] = useState<MoraleData | null>(null);
   const [isDecrypting, setIsDecrypting] = useState(false);
   const [contractAddress, setContractAddress] = useState("");
   const [fhevmInitializing, setFhevmInitializing] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
-  const [currentPage, setCurrentPage] = useState(1);
-  const itemsPerPage = 5;
+  const [userHistory, setUserHistory] = useState<MoraleData[]>([]);
+  const [showFAQ, setShowFAQ] = useState(false);
 
   const { status, initialize, isInitialized } = useFhevm();
-  const { encrypt, isEncrypting } = useEncrypt();
+  const { encrypt, isEncrypting} = useEncrypt();
   const { verifyDecryption, isDecrypting: fheIsDecrypting } = useDecrypt();
 
   useEffect(() => {
     const initFhevmAfterConnection = async () => {
-      if (!isConnected || isInitialized || fhevmInitializing) return;
+      if (!isConnected) return;
+      if (isInitialized || fhevmInitializing) return;
       
       try {
         setFhevmInitializing(true);
@@ -87,6 +97,15 @@ const App: React.FC = () => {
     loadDataAndContract();
   }, [isConnected]);
 
+  useEffect(() => {
+    if (address && moraleData.length > 0) {
+      const userEntries = moraleData.filter(entry => 
+        entry.creator.toLowerCase() === address.toLowerCase()
+      );
+      setUserHistory(userEntries);
+    }
+  }, [address, moraleData]);
+
   const loadData = async () => {
     if (!isConnected) return;
     
@@ -96,15 +115,15 @@ const App: React.FC = () => {
       if (!contract) return;
       
       const businessIds = await contract.getAllBusinessIds();
-      const moraleDataList: MoraleData[] = [];
+      const entriesList: MoraleData[] = [];
       
       for (const businessId of businessIds) {
         try {
           const businessData = await contract.getBusinessData(businessId);
-          moraleDataList.push({
+          entriesList.push({
             id: businessId,
             name: businessData.name,
-            moraleScore: Number(businessData.decryptedValue) || 0,
+            moraleScore: 0,
             timestamp: Number(businessData.timestamp),
             creator: businessData.creator,
             publicValue1: Number(businessData.publicValue1) || 0,
@@ -118,7 +137,7 @@ const App: React.FC = () => {
         }
       }
       
-      setMoraleList(moraleDataList);
+      setMoraleData(entriesList);
     } catch (e) {
       setTransactionStatus({ visible: true, status: "error", message: "Failed to load data" });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
@@ -127,54 +146,54 @@ const App: React.FC = () => {
     }
   };
 
-  const createMorale = async () => {
+  const createEntry = async () => {
     if (!isConnected || !address) { 
       setTransactionStatus({ visible: true, status: "error", message: "Please connect wallet first" });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
       return; 
     }
     
-    setCreatingMorale(true);
-    setTransactionStatus({ visible: true, status: "pending", message: "Creating morale data with Zama FHE..." });
+    setCreatingEntry(true);
+    setTransactionStatus({ visible: true, status: "pending", message: "Creating morale entry with FHE..." });
     
     try {
       const contract = await getContractWithSigner();
       if (!contract) throw new Error("Failed to get contract with signer");
       
-      const moraleValue = parseInt(newMoraleData.moraleScore) || 0;
+      const moraleValue = parseInt(newEntryData.morale) || 0;
       const businessId = `morale-${Date.now()}`;
       
       const encryptedResult = await encrypt(contractAddress, address, moraleValue);
       
       const tx = await contract.createBusinessData(
         businessId,
-        newMoraleData.name,
+        newEntryData.name,
         encryptedResult.encryptedData,
         encryptedResult.proof,
+        moraleValue,
         0,
-        0,
-        newMoraleData.description
+        newEntryData.description
       );
       
-      setTransactionStatus({ visible: true, status: "pending", message: "Waiting for transaction confirmation..." });
+      setTransactionStatus({ visible: true, status: "pending", message: "Waiting for transaction..." });
       await tx.wait();
       
-      setTransactionStatus({ visible: true, status: "success", message: "Morale data created successfully!" });
+      setTransactionStatus({ visible: true, status: "success", message: "Morale entry created!" });
       setTimeout(() => {
         setTransactionStatus({ visible: false, status: "pending", message: "" });
       }, 2000);
       
       await loadData();
       setShowCreateModal(false);
-      setNewMoraleData({ name: "", moraleScore: "", description: "" });
+      setNewEntryData({ name: "", morale: "", description: "" });
     } catch (e: any) {
       const errorMessage = e.message?.includes("user rejected transaction") 
-        ? "Transaction rejected by user" 
+        ? "Transaction rejected" 
         : "Submission failed: " + (e.message || "Unknown error");
       setTransactionStatus({ visible: true, status: "error", message: errorMessage });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
     } finally { 
-      setCreatingMorale(false); 
+      setCreatingEntry(false); 
     }
   };
 
@@ -197,7 +216,7 @@ const App: React.FC = () => {
         setTransactionStatus({ 
           visible: true, 
           status: "success", 
-          message: "Data already verified on-chain" 
+          message: "Data already verified" 
         });
         setTimeout(() => {
           setTransactionStatus({ visible: false, status: "pending", message: "" });
@@ -218,13 +237,13 @@ const App: React.FC = () => {
           contractWrite.verifyDecryption(businessId, abiEncodedClearValues, decryptionProof)
       );
       
-      setTransactionStatus({ visible: true, status: "pending", message: "Verifying decryption on-chain..." });
+      setTransactionStatus({ visible: true, status: "pending", message: "Verifying decryption..." });
       
       const clearValue = result.decryptionResult.clearValues[encryptedValueHandle];
       
       await loadData();
       
-      setTransactionStatus({ visible: true, status: "success", message: "Data decrypted and verified successfully!" });
+      setTransactionStatus({ visible: true, status: "success", message: "Data decrypted successfully!" });
       setTimeout(() => {
         setTransactionStatus({ visible: false, status: "pending", message: "" });
       }, 2000);
@@ -236,7 +255,7 @@ const App: React.FC = () => {
         setTransactionStatus({ 
           visible: true, 
           status: "success", 
-          message: "Data is already verified on-chain" 
+          message: "Data is already verified" 
         });
         setTimeout(() => {
           setTransactionStatus({ visible: false, status: "pending", message: "" });
@@ -264,36 +283,127 @@ const App: React.FC = () => {
       if (!contract) return;
       
       const isAvailable = await contract.isAvailable();
-      setTransactionStatus({ 
-        visible: true, 
-        status: "success", 
-        message: "Contract is available and ready" 
-      });
-      setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 2000);
+      if (isAvailable) {
+        setTransactionStatus({ visible: true, status: "success", message: "Contract is available!" });
+        setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 2000);
+      }
     } catch (e) {
       setTransactionStatus({ visible: true, status: "error", message: "Availability check failed" });
       setTimeout(() => setTransactionStatus({ visible: false, status: "pending", message: "" }), 3000);
     }
   };
 
-  const filteredMorale = moraleList.filter(item =>
-    item.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    item.description.toLowerCase().includes(searchTerm.toLowerCase())
+  const getMoraleStats = (): MoraleStats => {
+    const totalEntries = moraleData.length;
+    const verifiedEntries = moraleData.filter(entry => entry.isVerified);
+    const verifiedCount = verifiedEntries.length;
+    
+    const avgMorale = verifiedEntries.length > 0 
+      ? verifiedEntries.reduce((sum, entry) => sum + (entry.decryptedValue || 0), 0) / verifiedEntries.length 
+      : 0;
+    
+    const today = new Date().setHours(0,0,0,0);
+    const todayEntries = moraleData.filter(entry => 
+      new Date(entry.timestamp * 1000).setHours(0,0,0,0) === today
+    ).length;
+    
+    const highMoraleCount = verifiedEntries.filter(entry => (entry.decryptedValue || 0) >= 7).length;
+
+    return {
+      totalEntries,
+      avgMorale: Math.round(avgMorale * 10) / 10,
+      verifiedCount,
+      todayEntries,
+      highMoraleCount
+    };
+  };
+
+  const renderMoraleChart = () => {
+    const stats = getMoraleStats();
+    const verifiedEntries = moraleData.filter(entry => entry.isVerified);
+    
+    if (verifiedEntries.length === 0) {
+      return (
+        <div className="chart-placeholder">
+          <div className="chart-icon">📊</div>
+          <p>No verified data available for chart</p>
+          <span>Submit and verify morale entries to see analytics</span>
+        </div>
+      );
+    }
+
+    const scoreDistribution = [0,0,0,0,0,0,0,0,0,0];
+    verifiedEntries.forEach(entry => {
+      const score = entry.decryptedValue || 0;
+      if (score >= 1 && score <= 10) {
+        scoreDistribution[score-1]++;
+      }
+    });
+
+    const maxCount = Math.max(...scoreDistribution);
+
+    return (
+      <div className="morale-chart">
+        <h3>Morale Score Distribution</h3>
+        <div className="chart-bars">
+          {scoreDistribution.map((count, index) => (
+            <div key={index} className="chart-bar-container">
+              <div 
+                className="chart-bar" 
+                style={{ height: maxCount > 0 ? `${(count / maxCount) * 100}%` : '0%' }}
+              >
+                <span className="bar-count">{count}</span>
+              </div>
+              <span className="bar-label">{index + 1}</span>
+            </div>
+          ))}
+        </div>
+        <div className="chart-stats">
+          <div className="stat-item">
+            <span className="stat-value">{stats.avgMorale}</span>
+            <span className="stat-label">Avg Score</span>
+          </div>
+          <div className="stat-item">
+            <span className="stat-value">{stats.highMoraleCount}</span>
+            <span className="stat-label">High Morale</span>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const filteredData = moraleData.filter(entry =>
+    entry.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+    entry.description.toLowerCase().includes(searchTerm.toLowerCase()) ||
+    entry.creator.toLowerCase().includes(searchTerm.toLowerCase())
   );
 
-  const paginatedMorale = filteredMorale.slice(
-    (currentPage - 1) * itemsPerPage,
-    currentPage * itemsPerPage
-  );
-
-  const totalPages = Math.ceil(filteredMorale.length / itemsPerPage);
+  const faqItems = [
+    {
+      question: "What is FHE encryption?",
+      answer: "Fully Homomorphic Encryption allows computations on encrypted data without decryption, preserving privacy."
+    },
+    {
+      question: "How is my data protected?",
+      answer: "Your morale scores are encrypted on-chain and only you can decrypt them with proper authorization."
+    },
+    {
+      question: "What can others see?",
+      answer: "Others can only see encrypted data. Only with your permission can they verify decrypted values."
+    },
+    {
+      question: "How to verify my data?",
+      answer: "Click the verify button to perform offline decryption and on-chain verification."
+    }
+  ];
 
   if (!isConnected) {
     return (
       <div className="app-container">
         <header className="app-header">
           <div className="logo">
-            <h1>Confidential Team Morale 🔐</h1>
+            <h1>Team Morale FHE 🔐</h1>
+            <p>Confidential Team Morale Tracking</p>
           </div>
           <div className="header-actions">
             <ConnectButton accountStatus="address" chainStatus="icon" showBalance={false}/>
@@ -303,8 +413,22 @@ const App: React.FC = () => {
         <div className="connection-prompt">
           <div className="connection-content">
             <div className="connection-icon">😊</div>
-            <h2>Connect Your Wallet to Continue</h2>
-            <p>Please connect your wallet to access the confidential team morale system with FHE encryption.</p>
+            <h2>Connect Your Wallet to Start</h2>
+            <p>Protect your team's morale data with FHE encryption while gaining valuable insights.</p>
+            <div className="connection-steps">
+              <div className="step">
+                <span>1</span>
+                <p>Connect wallet to initialize FHE system</p>
+              </div>
+              <div className="step">
+                <span>2</span>
+                <p>Submit encrypted morale entries</p>
+              </div>
+              <div className="step">
+                <span>3</span>
+                <p>View anonymous team analytics</p>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -316,6 +440,7 @@ const App: React.FC = () => {
       <div className="loading-screen">
         <div className="fhe-spinner"></div>
         <p>Initializing FHE Encryption System...</p>
+        <p className="loading-note">Securing your team's morale data</p>
       </div>
     );
   }
@@ -323,155 +448,181 @@ const App: React.FC = () => {
   if (loading) return (
     <div className="loading-screen">
       <div className="fhe-spinner"></div>
-      <p>Loading confidential morale system...</p>
+      <p>Loading morale tracking system...</p>
     </div>
   );
+
+  const stats = getMoraleStats();
 
   return (
     <div className="app-container">
       <header className="app-header">
         <div className="logo">
-          <h1>Confidential Team Morale 😊</h1>
-          <p>FHE Protected Team Feedback System</p>
+          <h1>Team Morale FHE 🔐</h1>
+          <p>Encrypted Feedback • Anonymous Analytics</p>
         </div>
         
         <div className="header-actions">
-          <button onClick={checkAvailability} className="availability-btn">
-            Check Availability
+          <button className="nav-btn" onClick={() => setShowFAQ(!showFAQ)}>
+            {showFAQ ? "Back to App" : "FAQ"}
           </button>
-          <button 
-            onClick={() => setShowCreateModal(true)} 
-            className="create-btn"
-          >
-            + New Feedback
+          <button className="nav-btn" onClick={checkAvailability}>
+            Check Status
+          </button>
+          <button className="create-btn" onClick={() => setShowCreateModal(true)}>
+            + New Entry
           </button>
           <ConnectButton accountStatus="address" chainStatus="icon" showBalance={false}/>
         </div>
       </header>
       
-      <div className="main-content">
-        <div className="search-section">
-          <input
-            type="text"
-            placeholder="Search feedback..."
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-            className="search-input"
-          />
-          <button onClick={loadData} className="refresh-btn" disabled={isRefreshing}>
-            {isRefreshing ? "Refreshing..." : "Refresh"}
-          </button>
-        </div>
-
-        <div className="stats-panel">
-          <div className="stat-item">
-            <span className="stat-value">{moraleList.length}</span>
-            <span className="stat-label">Total Feedbacks</span>
-          </div>
-          <div className="stat-item">
-            <span className="stat-value">{moraleList.filter(m => m.isVerified).length}</span>
-            <span className="stat-label">Verified</span>
-          </div>
-          <div className="stat-item">
-            <span className="stat-value">
-              {moraleList.length > 0 
-                ? (moraleList.reduce((sum, m) => sum + (m.decryptedValue || 0), 0) / moraleList.length).toFixed(1)
-                : "0"
-              }
-            </span>
-            <span className="stat-label">Avg Morale</span>
+      {showFAQ ? (
+        <div className="faq-section">
+          <h2>Frequently Asked Questions</h2>
+          <div className="faq-grid">
+            {faqItems.map((item, index) => (
+              <div key={index} className="faq-card">
+                <h3>{item.question}</h3>
+                <p>{item.answer}</p>
+              </div>
+            ))}
           </div>
         </div>
-
-        <div className="morale-list">
-          {paginatedMorale.length === 0 ? (
-            <div className="no-data">
-              <p>No morale feedback found</p>
-              <button onClick={() => setShowCreateModal(true)} className="create-btn">
-                Create First Feedback
-              </button>
-            </div>
-          ) : (
-            paginatedMorale.map((morale, index) => (
-              <div 
-                className={`morale-item ${morale.isVerified ? 'verified' : ''}`}
-                key={index}
-                onClick={() => setSelectedMorale(morale)}
-              >
-                <div className="morale-header">
-                  <h3>{morale.name}</h3>
-                  <span className={`status ${morale.isVerified ? 'verified' : 'pending'}`}>
-                    {morale.isVerified ? '✅ Verified' : '🔓 Pending'}
-                  </span>
-                </div>
-                <p className="description">{morale.description}</p>
-                <div className="morale-footer">
-                  <span>Score: {morale.isVerified ? morale.decryptedValue : '🔒'}</span>
-                  <span>{new Date(morale.timestamp * 1000).toLocaleDateString()}</span>
+      ) : (
+        <>
+          <div className="stats-section">
+            <div className="stats-grid">
+              <div className="stat-card">
+                <div className="stat-icon">📈</div>
+                <div className="stat-content">
+                  <h3>{stats.totalEntries}</h3>
+                  <p>Total Entries</p>
                 </div>
               </div>
-            ))
-          )}
-        </div>
-
-        {totalPages > 1 && (
-          <div className="pagination">
-            <button 
-              onClick={() => setCurrentPage(prev => Math.max(prev - 1, 1))}
-              disabled={currentPage === 1}
-            >
-              Previous
-            </button>
-            <span>Page {currentPage} of {totalPages}</span>
-            <button 
-              onClick={() => setCurrentPage(prev => Math.min(prev + 1, totalPages))}
-              disabled={currentPage === totalPages}
-            >
-              Next
-            </button>
-          </div>
-        )}
-
-        <div className="fhe-info-panel">
-          <h3>FHE Protection Process</h3>
-          <div className="fhe-steps">
-            <div className="step">
-              <span>1</span>
-              <p>Encrypt morale score using Zama FHE</p>
-            </div>
-            <div className="step">
-              <span>2</span>
-              <p>Store encrypted data on-chain</p>
-            </div>
-            <div className="step">
-              <span>3</span>
-              <p>Offline decryption with proof generation</p>
-            </div>
-            <div className="step">
-              <span>4</span>
-              <p>On-chain verification using FHE.checkSignatures</p>
+              <div className="stat-card">
+                <div className="stat-icon">✅</div>
+                <div className="stat-content">
+                  <h3>{stats.verifiedCount}</h3>
+                  <p>Verified Data</p>
+                </div>
+              </div>
+              <div className="stat-card">
+                <div className="stat-icon">😊</div>
+                <div className="stat-content">
+                  <h3>{stats.avgMorale}</h3>
+                  <p>Average Morale</p>
+                </div>
+              </div>
+              <div className="stat-card">
+                <div className="stat-icon">🎯</div>
+                <div className="stat-content">
+                  <h3>{stats.todayEntries}</h3>
+                  <p>Today's Entries</p>
+                </div>
+              </div>
             </div>
           </div>
-        </div>
-      </div>
+
+          <div className="main-content">
+            <div className="content-left">
+              <div className="chart-section">
+                {renderMoraleChart()}
+              </div>
+              
+              <div className="user-history">
+                <h3>Your Submission History</h3>
+                <div className="history-list">
+                  {userHistory.slice(0, 5).map((entry, index) => (
+                    <div key={index} className="history-item">
+                      <span className="history-name">{entry.name}</span>
+                      <span className="history-score">
+                        {entry.isVerified ? `Score: ${entry.decryptedValue}` : 'Encrypted'}
+                      </span>
+                      <span className="history-date">
+                        {new Date(entry.timestamp * 1000).toLocaleDateString()}
+                      </span>
+                    </div>
+                  ))}
+                  {userHistory.length === 0 && (
+                    <div className="no-history">No submissions yet</div>
+                  )}
+                </div>
+              </div>
+            </div>
+            
+            <div className="content-right">
+              <div className="entries-section">
+                <div className="section-header">
+                  <h2>Team Morale Entries</h2>
+                  <div className="header-actions">
+                    <input
+                      type="text"
+                      placeholder="Search entries..."
+                      value={searchTerm}
+                      onChange={(e) => setSearchTerm(e.target.value)}
+                      className="search-input"
+                    />
+                    <button onClick={loadData} disabled={isRefreshing} className="refresh-btn">
+                      {isRefreshing ? "🔄" : "↻"}
+                    </button>
+                  </div>
+                </div>
+                
+                <div className="entries-list">
+                  {filteredData.length === 0 ? (
+                    <div className="no-entries">
+                      <p>No morale entries found</p>
+                      <button className="create-btn" onClick={() => setShowCreateModal(true)}>
+                        Create First Entry
+                      </button>
+                    </div>
+                  ) : filteredData.map((entry, index) => (
+                    <div 
+                      className={`entry-item ${selectedEntry?.id === entry.id ? "selected" : ""}`}
+                      key={index}
+                      onClick={() => setSelectedEntry(entry)}
+                    >
+                      <div className="entry-header">
+                        <span className="entry-name">{entry.name}</span>
+                        <span className={`entry-status ${entry.isVerified ? "verified" : "encrypted"}`}>
+                          {entry.isVerified ? "✅ Verified" : "🔒 Encrypted"}
+                        </span>
+                      </div>
+                      <p className="entry-desc">{entry.description}</p>
+                      <div className="entry-footer">
+                        <span className="entry-creator">
+                          {entry.creator.substring(0, 6)}...{entry.creator.substring(38)}
+                        </span>
+                        <span className="entry-date">
+                          {new Date(entry.timestamp * 1000).toLocaleDateString()}
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        </>
+      )}
       
       {showCreateModal && (
-        <ModalCreateMorale 
-          onSubmit={createMorale} 
+        <ModalCreateEntry 
+          onSubmit={createEntry} 
           onClose={() => setShowCreateModal(false)} 
-          creating={creatingMorale} 
-          moraleData={newMoraleData} 
-          setMoraleData={setNewMoraleData}
+          creating={creatingEntry} 
+          entryData={newEntryData} 
+          setEntryData={setNewEntryData}
           isEncrypting={isEncrypting}
         />
       )}
       
-      {selectedMorale && (
-        <MoraleDetailModal 
-          morale={selectedMorale} 
-          onClose={() => setSelectedMorale(null)} 
+      {selectedEntry && (
+        <EntryDetailModal 
+          entry={selectedEntry} 
+          onClose={() => setSelectedEntry(null)} 
           isDecrypting={isDecrypting || fheIsDecrypting} 
-          decryptData={() => decryptData(selectedMorale.id)}
+          decryptData={() => decryptData(selectedEntry.id)}
         />
       )}
       
@@ -479,7 +630,7 @@ const App: React.FC = () => {
         <div className="transaction-modal">
           <div className="transaction-content">
             <div className={`transaction-icon ${transactionStatus.status}`}>
-              {transactionStatus.status === "pending" && <div className="spinner"></div>}
+              {transactionStatus.status === "pending" && <div className="fhe-spinner"></div>}
               {transactionStatus.status === "success" && "✓"}
               {transactionStatus.status === "error" && "✗"}
             </div>
@@ -491,36 +642,41 @@ const App: React.FC = () => {
   );
 };
 
-const ModalCreateMorale: React.FC<{
+const ModalCreateEntry: React.FC<{
   onSubmit: () => void; 
   onClose: () => void; 
   creating: boolean;
-  moraleData: any;
-  setMoraleData: (data: any) => void;
+  entryData: any;
+  setEntryData: (data: any) => void;
   isEncrypting: boolean;
-}> = ({ onSubmit, onClose, creating, moraleData, setMoraleData, isEncrypting }) => {
+}> = ({ onSubmit, onClose, creating, entryData, setEntryData, isEncrypting }) => {
   const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
     const { name, value } = e.target;
-    if (name === 'moraleScore') {
+    if (name === 'morale') {
       const intValue = value.replace(/[^\d]/g, '');
-      setMoraleData({ ...moraleData, [name]: intValue });
+      const numValue = parseInt(intValue) || 0;
+      if (numValue >= 1 && numValue <= 10) {
+        setEntryData({ ...entryData, [name]: intValue });
+      } else if (intValue === '') {
+        setEntryData({ ...entryData, [name]: '' });
+      }
     } else {
-      setMoraleData({ ...moraleData, [name]: value });
+      setEntryData({ ...entryData, [name]: value });
     }
   };
 
   return (
     <div className="modal-overlay">
-      <div className="create-modal">
+      <div className="create-entry-modal">
         <div className="modal-header">
-          <h2>New Team Morale Feedback</h2>
-          <button onClick={onClose} className="close-modal">&times;</button>
+          <h2>New Morale Entry</h2>
+          <button onClick={onClose} className="close-modal">×</button>
         </div>
         
         <div className="modal-body">
           <div className="fhe-notice">
             <strong>FHE 🔐 Protection</strong>
-            <p>Morale score will be encrypted with Zama FHE (Integer only)</p>
+            <p>Your morale score will be encrypted with Zama FHE technology</p>
           </div>
           
           <div className="form-group">
@@ -528,7 +684,7 @@ const ModalCreateMorale: React.FC<{
             <input 
               type="text" 
               name="name" 
-              value={moraleData.name} 
+              value={entryData.name} 
               onChange={handleChange} 
               placeholder="Enter team or project name..." 
             />
@@ -538,26 +694,25 @@ const ModalCreateMorale: React.FC<{
             <label>Morale Score (1-10) *</label>
             <input 
               type="number" 
-              min="1" 
-              max="10" 
-              name="moraleScore" 
-              value={moraleData.moraleScore} 
+              name="morale" 
+              min="1"
+              max="10"
+              value={entryData.morale} 
               onChange={handleChange} 
-              placeholder="Enter morale score..." 
+              placeholder="Enter morale score 1-10..." 
             />
             <div className="data-type-label">FHE Encrypted Integer</div>
           </div>
           
           <div className="form-group">
-            <label>Feedback Description *</label>
+            <label>Description</label>
             <textarea 
               name="description" 
-              value={moraleData.description} 
+              value={entryData.description} 
               onChange={handleChange} 
-              placeholder="Enter your feedback..." 
+              placeholder="Optional description or context..." 
               rows={3}
             />
-            <div className="data-type-label">Public Data</div>
           </div>
         </div>
         
@@ -565,10 +720,10 @@ const ModalCreateMorale: React.FC<{
           <button onClick={onClose} className="cancel-btn">Cancel</button>
           <button 
             onClick={onSubmit} 
-            disabled={creating || isEncrypting || !moraleData.name || !moraleData.moraleScore || !moraleData.description} 
+            disabled={creating || isEncrypting || !entryData.name || !entryData.morale} 
             className="submit-btn"
           >
-            {creating || isEncrypting ? "Encrypting and Submitting..." : "Submit Feedback"}
+            {creating || isEncrypting ? "Encrypting..." : "Create Entry"}
           </button>
         </div>
       </div>
@@ -576,74 +731,127 @@ const ModalCreateMorale: React.FC<{
   );
 };
 
-const MoraleDetailModal: React.FC<{
-  morale: MoraleData;
+const EntryDetailModal: React.FC<{
+  entry: MoraleData;
   onClose: () => void;
   isDecrypting: boolean;
   decryptData: () => Promise<number | null>;
-}> = ({ morale, onClose, isDecrypting, decryptData }) => {
+}> = ({ entry, onClose, isDecrypting, decryptData }) => {
+  const [localDecrypted, setLocalDecrypted] = useState<number | null>(null);
+
   const handleDecrypt = async () => {
-    await decryptData();
+    if (entry.isVerified) return;
+    
+    const decrypted = await decryptData();
+    if (decrypted !== null) {
+      setLocalDecrypted(decrypted);
+    }
+  };
+
+  const getMoraleEmoji = (score: number) => {
+    if (score >= 9) return "😄";
+    if (score >= 7) return "😊";
+    if (score >= 5) return "😐";
+    if (score >= 3) return "😔";
+    return "😞";
   };
 
   return (
     <div className="modal-overlay">
-      <div className="detail-modal">
+      <div className="entry-detail-modal">
         <div className="modal-header">
-          <h2>Morale Feedback Details</h2>
-          <button onClick={onClose} className="close-modal">&times;</button>
+          <h2>Morale Entry Details</h2>
+          <button onClick={onClose} className="close-modal">×</button>
         </div>
         
         <div className="modal-body">
-          <div className="info-grid">
-            <div className="info-item">
-              <label>Team/Project:</label>
-              <span>{morale.name}</span>
+          <div className="entry-info">
+            <div className="info-row">
+              <span>Team Name:</span>
+              <strong>{entry.name}</strong>
             </div>
-            <div className="info-item">
-              <label>Creator:</label>
-              <span>{morale.creator.substring(0, 6)}...{morale.creator.substring(38)}</span>
+            <div className="info-row">
+              <span>Submitted by:</span>
+              <strong>{entry.creator.substring(0, 6)}...{entry.creator.substring(38)}</strong>
             </div>
-            <div className="info-item">
-              <label>Date:</label>
-              <span>{new Date(morale.timestamp * 1000).toLocaleDateString()}</span>
+            <div className="info-row">
+              <span>Date:</span>
+              <strong>{new Date(entry.timestamp * 1000).toLocaleDateString()}</strong>
             </div>
-            <div className="info-item">
-              <label>Morale Score:</label>
-              <span>
-                {morale.isVerified ? 
-                  `${morale.decryptedValue}/10 (Verified)` : 
-                  "🔒 Encrypted (Click to verify)"
-                }
-              </span>
-            </div>
-          </div>
-          
-          <div className="description-section">
-            <label>Feedback:</label>
-            <p>{morale.description}</p>
-          </div>
-          
-          <div className="verification-section">
-            <button 
-              className={`verify-btn ${morale.isVerified ? 'verified' : ''}`}
-              onClick={handleDecrypt} 
-              disabled={isDecrypting}
-            >
-              {isDecrypting ? "Verifying..." : 
-               morale.isVerified ? "✅ Verified On-chain" : "🔓 Verify Decryption"}
-            </button>
-            
-            {morale.isVerified && (
-              <div className="verification-success">
-                <p>✅ This feedback has been successfully verified on-chain using FHE signatures.</p>
+            {entry.description && (
+              <div className="info-row">
+                <span>Description:</span>
+                <p>{entry.description}</p>
               </div>
             )}
+          </div>
+          
+          <div className="data-section">
+            <h3>Encrypted Morale Data</h3>
+            
+            <div className="morale-display">
+              <div className="morale-value">
+                {entry.isVerified ? (
+                  <>
+                    <span className="morale-emoji">{getMoraleEmoji(entry.decryptedValue || 0)}</span>
+                    <span className="score">{entry.decryptedValue}/10</span>
+                    <span className="status-badge verified">On-chain Verified</span>
+                  </>
+                ) : localDecrypted !== null ? (
+                  <>
+                    <span className="morale-emoji">{getMoraleEmoji(localDecrypted)}</span>
+                    <span className="score">{localDecrypted}/10</span>
+                    <span className="status-badge local">Locally Decrypted</span>
+                  </>
+                ) : (
+                  <>
+                    <span className="morale-emoji">🔒</span>
+                    <span className="score">Encrypted</span>
+                    <span className="status-badge encrypted">FHE Protected</span>
+                  </>
+                )}
+              </div>
+              
+              <button 
+                className={`decrypt-btn ${entry.isVerified ? 'verified' : localDecrypted !== null ? 'decrypted' : ''}`}
+                onClick={handleDecrypt} 
+                disabled={isDecrypting || entry.isVerified}
+              >
+                {isDecrypting ? "Decrypting..." : 
+                 entry.isVerified ? "✅ Verified" : 
+                 localDecrypted !== null ? "🔓 Re-verify" : 
+                 "🔓 Verify Decryption"}
+              </button>
+            </div>
+            
+            <div className="fhe-explanation">
+              <div className="fhe-step">
+                <span>1</span>
+                <p>Data encrypted with FHE technology</p>
+              </div>
+              <div className="fhe-step">
+                <span>2</span>
+                <p>Stored securely on blockchain</p>
+              </div>
+              <div className="fhe-step">
+                <span>3</span>
+                <p>Only you can decrypt with proper authorization</p>
+              </div>
+            </div>
           </div>
         </div>
         
         <div className="modal-footer">
           <button onClick={onClose} className="close-btn">Close</button>
+          {!entry.isVerified && (
+            <button 
+              onClick={handleDecrypt} 
+              disabled={isDecrypting}
+              className="verify-btn"
+            >
+              {isDecrypting ? "Verifying..." : "Verify on-chain"}
+            </button>
+          )}
         </div>
       </div>
     </div>
